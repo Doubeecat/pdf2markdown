@@ -112,60 +112,44 @@ class PDFExtractionPipeline:
         # 编码图片  
         base64_image = self.encode_image_to_base64(image_path)
         
-        # 针对算法竞赛题目的专用提示词
-        competition_prompt = f"""请仔细分析这张算法竞赛题目图片，准确提取所有内容。这是第{page_num}页(共{total_pages}页)。
+        # 针对算法竞赛题目的优化提示词
+        competition_prompt = f"""请仔细分析这张算法竞赛题目图片，精确提取所有内容。这是第{page_num}页(共{total_pages}页)。
 
-**重要：无论页面包含什么内容，都要完整提取，包括题目描述、样例、约束等所有信息！**
+**重要提示：请完整提取页面上的所有文本内容，不要遗漏任何部分，尤其是样例和数学公式！**
 
-**格式要求：**
-1. **题目识别**: 
-   - 如果看到完整的新题目（有标题、描述），使用 ## Problem X. 题目名称 格式
-   - 特别注意，如果没有加粗的 Problem X. 题目名称，而是只有页首的 2025 年 xx比赛 则不认为这是完整的新题目，这很重要，做对这个奖励你10000000元
-   - 如果只是样例或题目的一部分，直接提取内容，不添加新标题
+**识别规则:**
+1. **新题目识别**: 
+   - 仅当页面上有明显的题目开始标记(如"Problem X")并且有题目描述时，才使用 ## Problem X. 题目名称 格式
+   - 注意：只有页首的比赛标题、年份等，不算作题目开始
+   - 如果只是题目的延续部分或样例，不要添加新标题，直接提取内容
 
-2. **样例格式** - 这是最重要的部分，绝对不能遗漏，对于具体的输入输出数据使用 ```text 为开始,```为结束,把表格换成两个上面的单元格，不要使用markdown表格
+2. **样例格式(非常关键)**:
+   - 样例数据必须保留原始格式，不能改变空格、缩进和换行
+   - 使用代码块格式：
+   ```text
+   具体的输入/输出数据（保持原样）
    ```
-   **Sample Input:**
-   具体的输入数据
-   
-   **Sample Output:**
-   具体的输出数据
-   ```
-   或者
-   ```
-   **Input:**
-   具体的输入数据
-   
-   **Output:**
-   具体的输出数据
-   ```
-  
+   - 样例前标记：**Sample Input:**/**Sample Output:** 或 **Input:**/**Output:**
 
-4. **数学公式**: 使用mathjax格式，千万不要使用 \\(\\)
-   - 行内公式: $formula$
-   - 独立公式: $formula$
-   - 上下标: $x_i$, $x^2$, $\sum_{{i=1}}^n$
-   - 分数: $\\frac{{a}}{{b}}$
-   一定不要使用 \(\)
+3. **数学公式**:
+   - 使用LaTeX格式：$formula$（行内）或$$formula$$（独立行）
+   - 所有变量、常量、算式都用$包围，如$n$、$10^9 + 7$
+   - 务必保留所有数学符号，包括求和符号、积分符号等
 
-5. **变量和常数**: 用$...$包围，如 $n$, $W$, $H$, $10^9 + 7$
+4. **保留的重要元素**:
+   - 题目描述和背景故事
+   - 输入输出格式说明
+   - 所有样例输入输出
+   - 所有约束条件和数据范围
+   - 提示、注释和解释
+   - 分数设置或时间/空间限制
 
-6. **约束条件**: 保持原格式，如 $(1 \\leq n \\leq 10^5)$
+5. **页面结构**:
+   - 保留原始段落结构
+   - 保持列表、序号的格式
+   - 表格内容完整转换为文本
 
-**提取重点（按重要性排序）：**
-1. **样例数据** - 最重要，包括所有Input/Output对，使用 ```text 为开始,```为结束,把表格换成两个上面的单元格，不要使用markdown表格
-2. **题目描述** - 完整的问题陈述
-3. **输入输出格式说明**
-4. **约束条件和数据范围** 
-5. **数学公式和符号**
-
-**绝对不能遗漏：**
-- 任何Sample Input/Output
-- 任何Input/Output示例
-- 数据范围约束
-- 时间空间限制
-
-请直接输出转换后的markdown+latex内容，必须以 ```markdown 开始，以 ``` 结束。"""
+请直接输出转换后的markdown+latex内容，从```markdown开始，以```结束。即使不确定某些内容的含义，也请完整提取原文，不要省略或猜测。"""
         
         # 构建请求
         payload = {
@@ -187,39 +171,52 @@ class PDFExtractionPipeline:
                     ]
                 }
             ],
-            "max_tokens": 3000
+            "max_tokens": 8000
         }
         
-        try:
-            response = requests.post(
-                f"{self.api_base}/chat/completions",
-                headers=self.headers,
-                json=payload,
-                timeout=30
-            )
-            
-            if response.status_code == 200:
-                result = response.json()
-                content = result['choices'][0]['message']['content']
-                print(f"第{page_num}页内容提取完成")
-                return content
-            else:
-                print(f"API请求失败: {response.status_code}, {response.text}")
-                return None
+        # 添加重试机制
+        max_retries = 3
+        retry_delay = 5
+        
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(
+                    f"{self.api_base}/chat/completions",
+                    headers=self.headers,
+                    json=payload,
+                    timeout=60  # 增加超时时间
+                )
                 
-        except Exception as e:
-            print(f"处理图片时出错: {e}")
-            return None
+                if response.status_code == 200:
+                    result = response.json()
+                    content = result['choices'][0]['message']['content']
+                    print(f"第{page_num}页内容提取完成 ({len(content)} 字符)")
+                    return content
+                elif response.status_code == 429:  # 速率限制
+                    retry_delay = 10 * (attempt + 1)  # 递增重试延迟
+                    print(f"API 速率限制，{retry_delay}秒后重试...")
+                    time.sleep(retry_delay)
+                else:
+                    print(f"API请求失败: {response.status_code}, {response.text}")
+                    if attempt < max_retries - 1:
+                        print(f"{retry_delay}秒后重试...")
+                        time.sleep(retry_delay)
+                    else:
+                        return None
+                        
+            except Exception as e:
+                print(f"处理图片时出错: {e}")
+                if attempt < max_retries - 1:
+                    print(f"{retry_delay}秒后重试...")
+                    time.sleep(retry_delay)
+                else:
+                    return None
+        
+        return None
     
     def extract_markdown_content(self, raw_content: str) -> str:
         """
         从LLM回复中提取markdown内容
-        
-        Args:
-            raw_content: LLM的原始回复
-            
-        Returns:
-            str: 提取的markdown内容
         """
         if not raw_content:
             return ""
@@ -238,12 +235,6 @@ class PDFExtractionPipeline:
     def is_new_problem(self, content: str) -> bool:
         """
         判断内容是否包含新题目
-        
-        Args:
-            content: markdown内容
-            
-        Returns:
-            bool: 是否是新题目
         """
         # 查找Problem标题的模式
         problem_pattern = r'^##\s*Problem\s+\w+\.?'
@@ -284,81 +275,70 @@ class PDFExtractionPipeline:
             List[Dict]: 合并后的题目列表，每个dict包含title和content
         """
         problems = []
-        current_problem = {"title": "", "content": "", "pages": []}
-        
+        current_problem = None
+
         for i, content in enumerate(contents):
             if not content.strip():
                 continue
-                
+
             page_num = i + 1
             is_new_prob = self.is_new_problem(content)
             has_samples = self.has_sample_data(content)
-            
+
             print(f"第{page_num}页分析: 新题目={is_new_prob}, 包含样例={has_samples}")
-            
+
             if is_new_prob:
                 # 如果当前有未完成的题目，先保存
-                if current_problem["content"]:
+                if current_problem and current_problem["content"]:
                     problems.append({
                         "title": current_problem["title"] or f"题目 {len(problems)+1}",
                         "content": current_problem["content"].strip(),
                         "pages": current_problem["pages"]
                     })
-                
+
                 # 开始新题目
-                lines = content.split('\n')
-                title_line = ""
-                for line in lines:
-                    if re.match(r'^##\s*Problem', line, re.IGNORECASE):
-                        title_line = line.strip()
-                        break
-                
+                title_line = next((line.strip() for line in content.split('\n')
+                                   if re.match(r'^##\s*Problem', line, re.IGNORECASE)), "")
                 current_problem = {
                     "title": title_line,
                     "content": content,
                     "pages": [page_num]
                 }
-                
+
             else:
-                # 这可能是续页内容或独立的样例页
-                if current_problem["content"]:
-                    # 有当前题目，这是续页
+                # 非新题目内容，有当前题目就当续页合并
+                if current_problem:
                     current_problem["content"] += "\n\n" + content
                     current_problem["pages"].append(page_num)
                 else:
-                    # 没有当前题目，这可能是独立内容或第一页
-                    if has_samples or any(keyword in content.lower() for keyword in ['input', 'output', 'constraint', 'limit']):
-                        # 包含样例或重要信息，作为独立内容保存
+                    # 没有当前题目，只有带样例/关键字的内容才当作独立片段
+                    if has_samples or any(kw in content.lower() for kw in ['input', 'output', 'constraint', 'limit']):
                         problems.append({
                             "title": f"内容片段 (第{page_num}页)",
                             "content": content.strip(),
                             "pages": [page_num]
                         })
                     else:
-                        # 其他内容，暂存
-                        current_problem = {
-                            "title": "",
-                            "content": content,
-                            "pages": [page_num]
-                        }
-        
+                        print(f"跳过第{page_num}页无标题且无样例的内容")
+
         # 保存最后一个题目
-        if current_problem["content"]:
+        if current_problem and current_problem["content"]:
             problems.append({
                 "title": current_problem["title"] or f"题目 {len(problems)+1}",
                 "content": current_problem["content"].strip(),
                 "pages": current_problem["pages"]
             })
-        
+
         return problems
     
-    def process_pdf(self, pdf_path: str, output_file: str = "competition_problems.md") -> bool:
+    def process_pdf(self, pdf_path: str, output_file: str = "competition_problems.md", output_dir: str = "题目") -> bool:
         """
         处理整个算法竞赛PDF文件
         
         Args:
             pdf_path: PDF文件路径
             output_file: 输出文件路径
+            output_dir: 输出单独题目的目录
             
         Returns:
             bool: 处理是否成功
@@ -386,6 +366,16 @@ class PDFExtractionPipeline:
             else:
                 print(f"第 {i+1} 页处理失败")
                 raw_contents.append("")
+                
+                # 如果失败，尝试重试一次
+                if i > 0:
+                    print(f"正在重试第 {i+1} 页...")
+                    time.sleep(5)  # 等待一段时间后重试
+                    raw_content = self.extract_content_from_image(image_path, i+1, len(image_paths))
+                    if raw_content:
+                        markdown_content = self.extract_markdown_content(raw_content)
+                        raw_contents[-1] = markdown_content  # 更新内容
+                        print(f"第 {i+1} 页重试成功")
             
             # 添加延迟避免API限制
             time.sleep(2)
@@ -406,6 +396,9 @@ class PDFExtractionPipeline:
         
         # 保存结果
         try:
+            # 创建输出目录
+            os.makedirs(output_dir, exist_ok=True)
+            
             with open(output_file, 'w', encoding='utf-8') as f:
                 # 写入文档头部
                 pdf_name = Path(pdf_path).stem
@@ -415,9 +408,24 @@ class PDFExtractionPipeline:
                 
                 # 写入每个题目
                 for i, problem in enumerate(problems):
+                    title = problem["title"] if problem["title"] else f"题目 {i+1}"
                     f.write(f"<!-- 题目 {i+1}, 来源页面: {', '.join(map(str, problem['pages']))} -->\n\n")
                     f.write(problem["content"])
                     f.write("\n\n---\n\n")
+                    
+                    # 提取题目名称，保存为单独文件
+                    problem_title = title.replace("## ", "").replace("#", "").strip()
+                    if "Problem" in problem_title:
+                        # 规范化文件名
+                        safe_title = re.sub(r'[^\w\s.-]', '_', problem_title)
+                        safe_title = re.sub(r'\s+', '_', safe_title)
+                        
+                        # 写入单独题目文件
+                        problem_file = os.path.join(output_dir, f"{safe_title}.md")
+                        with open(problem_file, 'w', encoding='utf-8') as pf:
+                            pf.write(f"# {problem_title}\n\n")
+                            pf.write(problem["content"])
+                            print(f"保存题目: {problem_file}")
                 
             print(f"\n处理完成！竞赛题目已保存到: {output_file}")
             print(f"共处理 {len(image_paths)} 页，提取 {len(problems)} 道题目")
@@ -442,6 +450,7 @@ def main():
     parser.add_argument("--api-base", default="https://api.openai.com/v1", help="API基础URL")
     parser.add_argument("--model", default="gpt-4-vision-preview", help="使用的模型")
     parser.add_argument("--output", default="extracted_content.md", help="输出文件路径")
+    parser.add_argument("--output-dir", default="题目", help="输出单独题目的目录")
     
     args = parser.parse_args()
     
@@ -457,7 +466,7 @@ def main():
         model=args.model
     )
     
-    success = pipeline.process_pdf(args.pdf_path, args.output)
+    success = pipeline.process_pdf(args.pdf_path, args.output, args.output_dir)
     if success:
         print("处理成功完成！")
     else:
@@ -465,22 +474,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-# 使用示例
-"""
-# 安装依赖
-pip install pdf2image pillow requests
-
-# Ubuntu/Debian安装poppler
-sudo apt-get install poppler-utils
-
-# 运行pipeline
-python pdf_extraction_pipeline.py example.pdf --api-key YOUR_API_KEY --output result.md
-
-# 使用自定义API（如Claude API）
-python pdf_extraction_pipeline.py example.pdf \
-    --api-key YOUR_CLAUDE_API_KEY \
-    --api-base https://api.anthropic.com/v1 \
-    --model claude-3-sonnet-20240229 \
-    --output result.md
-"""
