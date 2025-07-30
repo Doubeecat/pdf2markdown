@@ -395,8 +395,8 @@ if __name__ == "__main__":
             print("可用命令: single, batch, setup")
     else:
         print("使用方法:")
-        print("  python nowcoder_example.py single   # 处理单个PDF")
-        print("  python nowcoder_example.py batch    # 批量处理")
-        print("  python nowcoder_example.py setup    # 创建目录结构")
+        print("  python main.py single   # 处理单个PDF")
+        print("  python main.py batch    # 批量处理")
+        print("  python main.py setup    # 创建目录结构")
 
 # 期望的输出结构示例

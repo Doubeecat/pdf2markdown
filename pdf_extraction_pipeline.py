@@ -10,6 +10,7 @@ import base64
 import json
 import time
 import re
+import hashlib
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 import argparse
@@ -28,7 +29,7 @@ except ImportError as e:
     exit(1)
 
 class PDFExtractionPipeline:
-    def __init__(self, api_key: str, api_base: str = "https://api.openai.com/v1", model: str = "gpt-4-vision-preview"):
+    def __init__(self, api_key: str, api_base: str = "https://api.openai.com/v1", model: str = "gpt-4-vision-preview", use_cache: bool = True):
         """
         初始化PDF提取pipeline
         
@@ -36,14 +37,21 @@ class PDFExtractionPipeline:
             api_key: LLM API密钥
             api_base: API基础URL
             model: 使用的模型名称
+            use_cache: 是否使用缓存
         """
         self.api_key = api_key
         self.api_base = api_base
         self.model = model
+        self.use_cache = use_cache
         self.headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
         }
+        
+        # 创建缓存目录
+        self.cache_dir = "cache"
+        if self.use_cache:
+            os.makedirs(self.cache_dir, exist_ok=True)
         
     def split_pdf_pages(self, pdf_path: str, output_dir: str = "pages") -> List[str]:
         """
@@ -95,6 +103,132 @@ class PDFExtractionPipeline:
         with open(image_path, "rb") as image_file:
             return base64.b64encode(image_file.read()).decode('utf-8')
     
+    def get_image_hash(self, image_path: str) -> str:
+        """
+        计算图片文件的哈希值，用于缓存键
+        
+        Args:
+            image_path: 图片路径
+            
+        Returns:
+            str: 图片文件的SHA256哈希值
+        """
+        with open(image_path, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    
+    def get_cache_path(self, image_hash: str) -> str:
+        """
+        获取缓存文件路径
+        
+        Args:
+            image_hash: 图片哈希值
+            
+        Returns:
+            str: 缓存文件路径
+        """
+        return os.path.join(self.cache_dir, f"{image_hash}.json")
+    
+    def load_from_cache(self, image_path: str) -> Optional[str]:
+        """
+        从缓存加载LLM输出
+        
+        Args:
+            image_path: 图片路径
+            
+        Returns:
+            Optional[str]: 缓存的LLM输出，如果不存在则返回None
+        """
+        if not self.use_cache:
+            return None
+            
+        try:
+            image_hash = self.get_image_hash(image_path)
+            cache_path = self.get_cache_path(image_hash)
+            
+            if os.path.exists(cache_path):
+                with open(cache_path, 'r', encoding='utf-8') as f:
+                    cache_data = json.load(f)
+                    
+                # 检查模型是否匹配
+                if cache_data.get('model') == self.model:
+                    print(f"从缓存加载: {os.path.basename(image_path)}")
+                    return cache_data.get('content')
+                else:
+                    print(f"缓存模型不匹配，重新处理: {os.path.basename(image_path)}")
+                    
+        except Exception as e:
+            print(f"读取缓存失败: {e}")
+            
+        return None
+    
+    def save_to_cache(self, image_path: str, content: str) -> None:
+        """
+        保存LLM输出到缓存
+        
+        Args:
+            image_path: 图片路径
+            content: LLM输出内容
+        """
+        if not self.use_cache:
+            return
+            
+        try:
+            image_hash = self.get_image_hash(image_path)
+            cache_path = self.get_cache_path(image_hash)
+            
+            cache_data = {
+                'image_path': image_path,
+                'model': self.model,
+                'content': content,
+                'timestamp': time.time(),
+                'created_at': time.strftime('%Y-%m-%d %H:%M:%S')
+            }
+            
+            with open(cache_path, 'w', encoding='utf-8') as f:
+                json.dump(cache_data, f, ensure_ascii=False, indent=2)
+                
+        except Exception as e:
+            print(f"保存缓存失败: {e}")
+    
+    def clear_cache(self) -> None:
+        """
+        清理所有缓存文件
+        """
+        if not os.path.exists(self.cache_dir):
+            return
+            
+        try:
+            import shutil
+            shutil.rmtree(self.cache_dir)
+            os.makedirs(self.cache_dir, exist_ok=True)
+            print("缓存已清理")
+        except Exception as e:
+            print(f"清理缓存失败: {e}")
+    
+    def get_cache_info(self) -> Dict[str, int]:
+        """
+        获取缓存信息
+        
+        Returns:
+            Dict: 包含缓存文件数量和总大小的信息
+        """
+        if not os.path.exists(self.cache_dir):
+            return {"count": 0, "size": 0}
+            
+        count = 0
+        total_size = 0
+        
+        try:
+            for filename in os.listdir(self.cache_dir):
+                if filename.endswith('.json'):
+                    count += 1
+                    file_path = os.path.join(self.cache_dir, filename)
+                    total_size += os.path.getsize(file_path)
+        except Exception as e:
+            print(f"获取缓存信息失败: {e}")
+            
+        return {"count": count, "size": total_size}
+    
     def extract_content_from_image(self, image_path: str, page_num: int, total_pages: int) -> Optional[str]:
         """
         使用LLM从图片中提取算法竞赛题目内容
@@ -108,6 +242,12 @@ class PDFExtractionPipeline:
             Optional[str]: 提取的markdown+latex内容
         """
         print(f"正在处理图片: {image_path} (第{page_num}/{total_pages}页)")
+        
+        # 首先尝试从缓存加载
+        cached_content = self.load_from_cache(image_path)
+        if cached_content:
+            print(f"第{page_num}页内容从缓存加载完成 ({len(cached_content)} 字符)")
+            return cached_content
         
         # 编码图片  
         base64_image = self.encode_image_to_base64(image_path)
@@ -124,6 +264,7 @@ class PDFExtractionPipeline:
    - 如果只是题目的延续部分或样例，不要添加新标题，直接提取内容
 
 2. **样例格式(非常关键)**:
+   - 所有样例都会以 标准输入，标准输出的表格为格式
    - 样例数据必须保留原始格式，不能改变空格、缩进和换行
    - 使用代码块格式：
    ```text
@@ -149,7 +290,7 @@ class PDFExtractionPipeline:
    - 保持列表、序号的格式
    - 表格内容完整转换为文本
 
-请直接输出转换后的markdown+latex内容，从```markdown开始，以```结束。即使不确定某些内容的含义，也请完整提取原文，不要省略或猜测。"""
+请直接输出转换后的markdown+latex内容，即使不确定某些内容的含义，也请完整提取原文，不要省略或猜测，不要输出任何其他东西。"""
         
         # 构建请求
         payload = {
@@ -191,6 +332,10 @@ class PDFExtractionPipeline:
                     result = response.json()
                     content = result['choices'][0]['message']['content']
                     print(f"第{page_num}页内容提取完成 ({len(content)} 字符)")
+                    
+                    # 保存到缓存
+                    self.save_to_cache(image_path, content)
+                    
                     return content
                 elif response.status_code == 429:  # 速率限制
                     retry_delay = 10 * (attempt + 1)  # 递增重试延迟
@@ -214,30 +359,12 @@ class PDFExtractionPipeline:
         
         return None
     
-    def extract_markdown_content(self, raw_content: str) -> str:
-        """
-        从LLM回复中提取markdown内容
-        """
-        if not raw_content:
-            return ""
-        
-        # 查找```markdown和```之间的内容
-        pattern = r'```markdown\s*\n(.*?)\n```'
-        match = re.search(pattern, raw_content, re.DOTALL)
-        
-        if match:
-            return match.group(1).strip()
-        else:
-            # 如果没找到markdown标记，返回原内容
-            print("警告: 未找到markdown标记，使用原始内容")
-            return raw_content.strip()
-    
     def is_new_problem(self, content: str) -> bool:
         """
         判断内容是否包含新题目
         """
-        # 查找Problem标题的模式
-        problem_pattern = r'^##\s*Problem\s+\w+\.?'
+        # 查找Problem标题的模式，匹配 ## Problem X. 任意标题
+        problem_pattern = r'^##\s*Problem\s+\w+\.'
         return bool(re.search(problem_pattern, content, re.MULTILINE | re.IGNORECASE))
     
     def has_sample_data(self, content: str) -> bool:
@@ -255,13 +382,18 @@ class PDFExtractionPipeline:
             r'Sample\s+Output', 
             r'Input:?\s*\n',
             r'Output:?\s*\n',
-            r'样例输入',
-            r'样例输出',
+            r'标准输入',
+            r'标准输出',
             # 添加表格相关的模式
             r'\|.*\|.*\|',  # 检测markdown表格
             r'```text\s*\n.*\n```',  # 检测代码块中的数据
             r'\d+\s*\n\d+',  # 检测数字数据模式（常见于样例）
             r'^\s*\d+\s+\d+\s*$',  # 检测空格分隔的数字
+            # 检测样例输入输出的其他模式
+            r'\*\*Sample Input:\*\*',
+            r'\*\*Sample Output:\*\*',
+            r'\*\*Input:\*\*',
+            r'\*\*Output:\*\*',
         ]
         
         for pattern in sample_patterns:
@@ -320,6 +452,7 @@ class PDFExtractionPipeline:
 
         for i, content in enumerate(contents):
             if not content.strip():
+                print(f"第{i+1}页: 空内容，跳过")
                 continue
 
             page_num = i + 1
@@ -332,6 +465,7 @@ class PDFExtractionPipeline:
             if is_new_prob:
                 # 如果当前有未完成的题目，先保存
                 if current_problem and current_problem["content"]:
+                    print(f"保存题目: {current_problem['title']}, 页面: {current_problem['pages']}")
                     problems.append({
                         "title": current_problem["title"] or f"题目 {len(problems)+1}",
                         "content": current_problem["content"].strip(),
@@ -341,6 +475,7 @@ class PDFExtractionPipeline:
                 # 开始新题目
                 title_line = next((line.strip() for line in content.split('\n')
                                    if re.match(r'^##\s*Problem', line, re.IGNORECASE)), "")
+                print(f"开始新题目: {title_line}")
                 current_problem = {
                     "title": title_line,
                     "content": content,
@@ -354,7 +489,7 @@ class PDFExtractionPipeline:
                     # 这样可以确保样例页面（包括只有表格的）都能正确归到题目下
                     current_problem["content"] += "\n\n" + content
                     current_problem["pages"].append(page_num)
-                    print(f"第{page_num}页合并到当前题目")
+                    print(f"第{page_num}页合并到当前题目: {current_problem['title']}")
                 else:
                     # 没有当前题目的情况
                     if has_samples or is_likely_sample or any(kw in content.lower() for kw in ['input', 'output', 'constraint', 'limit', 'example']):
@@ -370,15 +505,17 @@ class PDFExtractionPipeline:
 
         # 保存最后一个题目
         if current_problem and current_problem["content"]:
+            print(f"保存最后一个题目: {current_problem['title']}, 页面: {current_problem['pages']}")
             problems.append({
                 "title": current_problem["title"] or f"题目 {len(problems)+1}",
                 "content": current_problem["content"].strip(),
                 "pages": current_problem["pages"]
             })
 
+        print(f"合并完成，总共 {len(problems)} 个题目")
         return problems
     
-    def process_pdf(self, pdf_path: str, output_file: str = "competition_problems.md", output_dir: str = "题目") -> bool:
+    def process_pdf(self, pdf_path: str, output_file: str = "competition_problems.md", output_dir: str = "题目", debug: bool = True) -> bool:
         """
         处理整个算法竞赛PDF文件
         
@@ -386,11 +523,27 @@ class PDFExtractionPipeline:
             pdf_path: PDF文件路径
             output_file: 输出文件路径
             output_dir: 输出单独题目的目录
+            debug: 是否开启调试模式，保存每页的原始输出
             
         Returns:
             bool: 处理是否成功
         """
         print(f"开始处理算法竞赛PDF: {pdf_path}")
+        
+        # 创建调试日志目录
+        if debug:
+            log_dir = "debug_logs"
+            os.makedirs(log_dir, exist_ok=True)
+            pdf_name = Path(pdf_path).stem
+            debug_log_file = os.path.join(log_dir, f"{pdf_name}_debug.log")
+            
+            with open(debug_log_file, 'w', encoding='utf-8') as log_f:
+                log_f.write(f"=== PDF处理调试日志 ===\n")
+                log_f.write(f"PDF文件: {pdf_path}\n")
+                log_f.write(f"处理时间: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                log_f.write(f"{'='*50}\n\n")
+            
+            print(f"调试模式开启，日志将保存到: {debug_log_file}")
         
         # 分割PDF页面
         image_paths = self.split_pdf_pages(pdf_path)
@@ -406,13 +559,32 @@ class PDFExtractionPipeline:
             
             raw_content = self.extract_content_from_image(image_path, i+1, len(image_paths))
             if raw_content:
-                # 提取markdown内容
-                markdown_content = self.extract_markdown_content(raw_content)
-                raw_contents.append(markdown_content)
+                raw_contents.append(raw_content)
                 print(f"第 {i+1} 页处理完成")
+                
+                # 调试日志：保存原始LLM输出
+                if debug:
+                    with open(debug_log_file, 'a', encoding='utf-8') as log_f:
+                        log_f.write(f"=== 第 {i+1} 页 ===\n")
+                        log_f.write(f"图片路径: {image_path}\n")
+                        log_f.write(f"处理状态: 成功\n")
+                        log_f.write(f"LLM输出长度: {len(raw_content)} 字符\n")
+                        log_f.write(f"\n--- LLM输出 ---\n")
+                        log_f.write(raw_content)
+                        log_f.write(f"\n\n{'='*50}\n\n")
+                        
             else:
                 print(f"第 {i+1} 页处理失败")
                 raw_contents.append("")
+                
+                # 调试日志：记录失败情况
+                if debug:
+                    with open(debug_log_file, 'a', encoding='utf-8') as log_f:
+                        log_f.write(f"=== 第 {i+1} 页 ===\n")
+                        log_f.write(f"图片路径: {image_path}\n")
+                        log_f.write(f"处理状态: 失败\n")
+                        log_f.write(f"错误信息: API请求失败或超时\n")
+                        log_f.write(f"\n{'='*50}\n\n")
                 
                 # 如果失败，尝试重试一次
                 if i > 0:
@@ -420,9 +592,19 @@ class PDFExtractionPipeline:
                     time.sleep(5)  # 等待一段时间后重试
                     raw_content = self.extract_content_from_image(image_path, i+1, len(image_paths))
                     if raw_content:
-                        markdown_content = self.extract_markdown_content(raw_content)
-                        raw_contents[-1] = markdown_content  # 更新内容
+                        raw_contents[-1] = raw_content  # 更新内容
                         print(f"第 {i+1} 页重试成功")
+                        
+                        # 调试日志：记录重试成功
+                        if debug:
+                            with open(debug_log_file, 'a', encoding='utf-8') as log_f:
+                                log_f.write(f"=== 第 {i+1} 页 (重试) ===\n")
+                                log_f.write(f"图片路径: {image_path}\n")
+                                log_f.write(f"处理状态: 重试成功\n")
+                                log_f.write(f"LLM输出长度: {len(raw_content)} 字符\n")
+                                log_f.write(f"\n--- LLM输出 (重试) ---\n")
+                                log_f.write(raw_content)
+                                log_f.write(f"\n\n{'='*50}\n\n")
             
             # 添加延迟避免API限制
             time.sleep(2)
@@ -435,11 +617,34 @@ class PDFExtractionPipeline:
             if content.strip():
                 has_problem = self.is_new_problem(content)
                 has_sample = self.has_sample_data(content)
-                print(f"第{i+1}页: 新题目={has_problem}, 样例={has_sample}, 长度={len(content)}")
+                is_likely_sample = self.is_likely_sample_page(content)
+                print(f"第{i+1}页: 新题目={has_problem}, 样例={has_sample}, 可能样例页={is_likely_sample}, 长度={len(content)}")
+                
+                # 调试日志：记录分析结果
+                if debug:
+                    with open(debug_log_file, 'a', encoding='utf-8') as log_f:
+                        log_f.write(f"=== 第 {i+1} 页分析结果 ===\n")
+                        log_f.write(f"是否新题目: {has_problem}\n")
+                        log_f.write(f"包含样例: {has_sample}\n")
+                        log_f.write(f"可能是样例页: {is_likely_sample}\n")
+                        log_f.write(f"内容长度: {len(content)}\n")
+                        log_f.write(f"内容预览 (前200字符):\n{content[:200]}...\n")
+                        log_f.write(f"\n{'='*30}\n\n")
             else:
                 print(f"第{i+1}页: 空内容")
         
         problems = self.merge_problem_content(raw_contents)
+        
+        # 调试日志：记录合并结果
+        if debug:
+            with open(debug_log_file, 'a', encoding='utf-8') as log_f:
+                log_f.write(f"=== 合并结果摘要 ===\n")
+                log_f.write(f"总共提取题目数: {len(problems)}\n")
+                for i, problem in enumerate(problems):
+                    title = problem["title"] if problem["title"] else f"题目 {i+1}"
+                    pages = ", ".join(map(str, problem["pages"]))
+                    log_f.write(f"题目 {i+1}: {title} (页面: {pages})\n")
+                log_f.write(f"\n{'='*50}\n\n")
         
         # 保存结果
         try:
@@ -476,6 +681,8 @@ class PDFExtractionPipeline:
                 
             print(f"\n处理完成！竞赛题目已保存到: {output_file}")
             print(f"共处理 {len(image_paths)} 页，提取 {len(problems)} 道题目")
+            if debug:
+                print(f"调试日志已保存到: {debug_log_file}")
             
             # 输出题目摘要
             print("\n题目摘要:")
@@ -494,28 +701,53 @@ def main():
     parser = argparse.ArgumentParser(description="PDF题目提取Pipeline (优化版)")
     parser.add_argument("pdf_path", help="PDF文件路径")
     parser.add_argument("--api-key", required=True, help="LLM API密钥")
-    parser.add_argument("--api-base", default="https://api.openai.com/v1", help="API基础URL")
-    parser.add_argument("--model", default="gpt-4-vision-preview", help="使用的模型")
+    parser.add_argument("--api-base", default="https://dashscope.aliyuncs.com/compatible-mode/v1", help="API基础URL")
+    parser.add_argument("--model", default="qwen-vl-max", help="使用的模型")
     parser.add_argument("--output", default="extracted_content.md", help="输出文件路径")
     parser.add_argument("--output-dir", default="题目", help="输出单独题目的目录")
+    parser.add_argument("--debug", action="store_true", help="开启调试模式，保存详细日志")
+    parser.add_argument("--no-cache", action="store_true", help="禁用缓存功能")
+    parser.add_argument("--clear-cache", action="store_true", help="清理缓存并退出")
+    parser.add_argument("--cache-info", action="store_true", help="显示缓存信息并退出")
     
     args = parser.parse_args()
+    
+    # 创建pipeline用于缓存操作
+    pipeline = PDFExtractionPipeline(
+        api_key=args.api_key,
+        api_base=args.api_base,
+        model=args.model,
+        use_cache=not args.no_cache
+    )
+    
+    # 处理缓存管理命令
+    if args.clear_cache:
+        pipeline.clear_cache()
+        return
+        
+    if args.cache_info:
+        info = pipeline.get_cache_info()
+        print(f"缓存信息:")
+        print(f"  文件数量: {info['count']}")
+        print(f"  总大小: {info['size'] / 1024 / 1024:.2f} MB")
+        return
     
     # 检查文件是否存在
     if not os.path.exists(args.pdf_path):
         print(f"PDF文件不存在: {args.pdf_path}")
         return
     
-    # 创建pipeline并处理
-    pipeline = PDFExtractionPipeline(
-        api_key=args.api_key,
-        api_base=args.api_base,
-        model=args.model
-    )
+    # 显示缓存状态
+    if not args.no_cache:
+        cache_info = pipeline.get_cache_info()
+        print(f"缓存状态: {cache_info['count']} 个文件 ({cache_info['size'] / 1024 / 1024:.2f} MB)")
     
-    success = pipeline.process_pdf(args.pdf_path, args.output, args.output_dir)
+    success = pipeline.process_pdf(args.pdf_path, args.output, args.output_dir, args.debug)
     if success:
         print("处理成功完成！")
+        if not args.no_cache:
+            final_cache_info = pipeline.get_cache_info()
+            print(f"最终缓存: {final_cache_info['count']} 个文件 ({final_cache_info['size'] / 1024 / 1024:.2f} MB)")
     else:
         print("处理过程中出现错误")
 
