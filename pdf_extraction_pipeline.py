@@ -256,12 +256,53 @@ class PDFExtractionPipeline:
             r'Input:?\s*\n',
             r'Output:?\s*\n',
             r'样例输入',
-            r'样例输出'
+            r'样例输出',
+            # 添加表格相关的模式
+            r'\|.*\|.*\|',  # 检测markdown表格
+            r'```text\s*\n.*\n```',  # 检测代码块中的数据
+            r'\d+\s*\n\d+',  # 检测数字数据模式（常见于样例）
+            r'^\s*\d+\s+\d+\s*$',  # 检测空格分隔的数字
         ]
         
         for pattern in sample_patterns:
-            if re.search(pattern, content, re.IGNORECASE):
+            if re.search(pattern, content, re.IGNORECASE | re.MULTILINE):
                 return True
+        return False
+    
+    def is_likely_sample_page(self, content: str) -> bool:
+        """
+        判断页面是否可能包含样例数据（即使没有明确标识）
+        
+        Args:
+            content: markdown内容
+            
+        Returns:
+            bool: 是否可能是样例页面
+        """
+        # 如果内容很短且主要是数据，可能是样例
+        lines = [line.strip() for line in content.split('\n') if line.strip()]
+        
+        # 如果行数很少（比如小于10行）且包含数字或表格结构
+        if len(lines) <= 10:
+            data_patterns = [
+                r'^\d+$',  # 纯数字行
+                r'^\d+\s+\d+',  # 空格分隔的数字
+                r'\|.*\|',  # 表格行
+                r'^[\d\s]+$',  # 只包含数字和空格
+                r'```text',  # 代码块
+            ]
+            
+            data_line_count = 0
+            for line in lines:
+                for pattern in data_patterns:
+                    if re.search(pattern, line):
+                        data_line_count += 1
+                        break
+            
+            # 如果超过一半的行都是数据格式，认为是样例页面
+            if data_line_count >= len(lines) * 0.5 and data_line_count >= 2:
+                return True
+        
         return False
     
     def merge_problem_content(self, contents: List[str]) -> List[Dict[str, str]]:
@@ -284,8 +325,9 @@ class PDFExtractionPipeline:
             page_num = i + 1
             is_new_prob = self.is_new_problem(content)
             has_samples = self.has_sample_data(content)
+            is_likely_sample = self.is_likely_sample_page(content)
 
-            print(f"第{page_num}页分析: 新题目={is_new_prob}, 包含样例={has_samples}")
+            print(f"第{page_num}页分析: 新题目={is_new_prob}, 包含样例={has_samples}, 可能是样例页={is_likely_sample}")
 
             if is_new_prob:
                 # 如果当前有未完成的题目，先保存
@@ -306,20 +348,25 @@ class PDFExtractionPipeline:
                 }
 
             else:
-                # 非新题目内容，有当前题目就当续页合并
+                # 非新题目内容
                 if current_problem:
+                    # 有当前题目，无论是什么内容都合并进去
+                    # 这样可以确保样例页面（包括只有表格的）都能正确归到题目下
                     current_problem["content"] += "\n\n" + content
                     current_problem["pages"].append(page_num)
+                    print(f"第{page_num}页合并到当前题目")
                 else:
-                    # 没有当前题目，只有带样例/关键字的内容才当作独立片段
-                    if has_samples or any(kw in content.lower() for kw in ['input', 'output', 'constraint', 'limit']):
+                    # 没有当前题目的情况
+                    if has_samples or is_likely_sample or any(kw in content.lower() for kw in ['input', 'output', 'constraint', 'limit', 'example']):
+                        # 包含样例或重要信息，作为独立内容保存
                         problems.append({
                             "title": f"内容片段 (第{page_num}页)",
                             "content": content.strip(),
                             "pages": [page_num]
                         })
+                        print(f"第{page_num}页作为独立片段保存")
                     else:
-                        print(f"跳过第{page_num}页无标题且无样例的内容")
+                        print(f"跳过第{page_num}页无标题且无关键内容")
 
         # 保存最后一个题目
         if current_problem and current_problem["content"]:

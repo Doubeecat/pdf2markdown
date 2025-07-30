@@ -375,7 +375,7 @@ def show_config_info():
 
 
 if __name__ == "__main__":
-    print("🏆 牛客算法竞赛PDF处理工具")
+    print("🏆 算法竞赛PDF处理工具")
     print("="*50)
     
     if len(sys.argv) > 1:
