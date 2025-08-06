@@ -10,6 +10,9 @@ from pathlib import Path
 
 # 假设你已经有了这些模块
 from pdf_extraction_pipeline import PDFExtractionPipeline
+from pdf_extraction_pipeline_optimized import OptimizedPDFExtractionPipeline
+from pdf_extraction_pipeline_smart import SmartPDFExtractionPipeline
+from sample_enhanced_pipeline import SampleEnhancedPipeline
 from cp_tools import CompetitionProblemProcessor, CompetitionBatchProcessor
 
 def load_config():
@@ -37,6 +40,7 @@ def load_config():
         },
         "processing_settings": {
             "default_api": "claude",
+            "processing_mode": "sample_enhanced",  # 可选: "original", "optimized", "smart", "sample_enhanced"
             "pdf_file": "example.pdf",
             "output_file": "problems.md",
             "problems_dir": "problems",
@@ -116,6 +120,7 @@ def process_contest():
     # 获取API设置
     processing_settings = config["processing_settings"]
     api_name = processing_settings.get("default_api", "claude")
+    processing_mode = processing_settings.get("processing_mode", "sample_enhanced")
     
     # 验证API配置
     if not validate_api_config(config, api_name):
@@ -123,15 +128,45 @@ def process_contest():
     
     api_config = config["api_settings"][api_name]
     
-    print(f"🚀 使用 {api_name.upper()} API 处理PDF")
+    # 根据处理模式选择合适的pipeline
+    mode_info = {
+        "original": ("标准模式", "使用原始LLM处理"),
+        "optimized": ("优化模式", "混合文本提取 + LLM处理"),
+        "smart": ("智能模式", "LLM主导 + 样例文本增强"),
+        "sample_enhanced": ("样例优化模式", "专门优化样例格式的LLM处理")
+    }
+    
+    mode_name, mode_desc = mode_info.get(processing_mode, ("样例优化模式", "专门优化样例格式的LLM处理"))
+    
+    print(f"🚀 使用 {api_name.upper()} API 处理PDF ({mode_name})")
+    print(f"📝 {mode_desc}")
     print("="*60)
     
-    # 初始化pipeline
-    pipeline = PDFExtractionPipeline(
-        api_key=api_config["api_key"],
-        api_base=api_config["api_base"], 
-        model=api_config["model"]
-    )
+    # 初始化对应的pipeline
+    if processing_mode == "original":
+        pipeline = PDFExtractionPipeline(
+            api_key=api_config["api_key"],
+            api_base=api_config["api_base"], 
+            model=api_config["model"]
+        )
+    elif processing_mode == "optimized":
+        pipeline = OptimizedPDFExtractionPipeline(
+            api_key=api_config["api_key"],
+            api_base=api_config["api_base"], 
+            model=api_config["model"]
+        )
+    elif processing_mode == "smart":
+        pipeline = SmartPDFExtractionPipeline(
+            api_key=api_config["api_key"],
+            api_base=api_config["api_base"], 
+            model=api_config["model"]
+        )
+    else:  # sample_enhanced (默认)
+        pipeline = SampleEnhancedPipeline(
+            api_key=api_config["api_key"],
+            api_base=api_config["api_base"], 
+            model=api_config["model"]
+        )
     
     # PDF文件路径（你的文件）
     pdf_file = "example.pdf"
@@ -145,9 +180,17 @@ def process_contest():
     
     # 步骤1: 提取完整题目到markdown
     output_file = "完整题目.md"
-    print(f"\n📝 步骤1: 提取题目到 {output_file}")
+    print(f"\n📝 步骤1: 提取题目到 {output_file} ({mode_name})")
     
-    success = pipeline.process_pdf(pdf_file, output_file)
+    # 根据pipeline类型调用对应的方法
+    if processing_mode == "original":
+        success = pipeline.process_pdf(pdf_file, output_file)
+    elif processing_mode == "optimized":
+        success = pipeline.process_pdf_optimized(pdf_file, output_file)
+    elif processing_mode == "smart":
+        success = pipeline.process_pdf_smart(pdf_file, output_file)
+    else:  # sample_enhanced
+        success = pipeline.process_pdf(pdf_file, output_file, debug=True)
     
     if not success:
         print("❌ PDF处理失败")
@@ -360,6 +403,14 @@ def show_config_info():
     
     # 显示处理设置
     print(f"\n⚙️  处理设置:")
+    processing_mode = processing_settings.get('processing_mode', 'sample_enhanced')
+    mode_names = {
+        "original": "标准模式",
+        "optimized": "优化模式", 
+        "smart": "智能模式",
+        "sample_enhanced": "样例优化模式"
+    }
+    print(f"   - 处理模式: {mode_names.get(processing_mode, processing_mode)}")
     print(f"   - DPI: {processing_settings.get('dpi', 400)}")
     print(f"   - 页面延迟: {processing_settings.get('delay_between_pages', 2)}秒")
     print(f"   - 最大Token: {processing_settings.get('max_tokens', 3000)}")
@@ -390,13 +441,27 @@ if __name__ == "__main__":
         elif command == "setup":
             # 创建目录结构
             create_sample_structure()
+        elif command == "config":
+            # 显示配置信息
+            show_config_info()
         else:
             print("❌ 未知命令")
-            print("可用命令: single, batch, setup")
+            print("可用命令:")
+            print("  single  - 处理单个PDF")
+            print("  batch   - 批量处理")
+            print("  setup   - 创建目录结构")
+            print("  config  - 显示配置信息")
     else:
         print("使用方法:")
         print("  python main.py single   # 处理单个PDF")
         print("  python main.py batch    # 批量处理")
         print("  python main.py setup    # 创建目录结构")
+        print("  python main.py config   # 显示配置信息")
+        print("\n📝 处理模式说明:")
+        print("  - original: 标准模式 (使用原始LLM处理)")
+        print("  - optimized: 优化模式 (混合文本提取 + LLM)")
+        print("  - smart: 智能模式 (LLM主导 + 样例文本增强)")
+        print("  - sample_enhanced: 样例优化模式 (专门优化样例格式) ⭐推荐")
+        print("\n💡 在config.json中设置processing_mode来选择处理模式")
 
 # 期望的输出结构示例
